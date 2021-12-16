@@ -1,13 +1,16 @@
 import numpy as np
 import torch
 import argparse
+import pandas as pd
 import sys
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, Dataset
 import torchvision
 from torchsummary import summary
+from torchvision import datasets
 from PIL import Image
 import os
+import csv
 from collections import Counter
 from sklearn.metrics import classification_report
 import seaborn as sns
@@ -32,7 +35,7 @@ PATH_VAL = REL + '/dataset/images/Val/'
 
 CHECKPOINT = REL + '/model_checkpoints/resnet50/'
 VISUALIZATION = REL + '/visualization/resnet50/'
-
+FUSION = REL + '/fusion_csv/'
 # {0: 71, 1: 612, 2: 3252, 3: 1279, 4: 912} counts
 
 
@@ -75,31 +78,41 @@ class EarlyStopping:
 
 
 class Resnet50(torch.nn.Module):
-  def __init__(self):
-    super(Resnet50,self).__init__()
+    def __init__(self):
+        super(Resnet50,self).__init__()
 
-    self.resnet = torchvision.models.resnet50(pretrained=True)
-    modules = list(self.resnet.children())[:-1]
-    self.resnet = torch.nn.Sequential(*modules)
-  
-    for params in self.resnet.parameters():
-      params.requires_grad = False
+        self.resnet = torchvision.models.resnet50(pretrained=True)
+        modules = list(self.resnet.children())[:-1]
+        self.resnet = torch.nn.Sequential(*modules)
     
+        for params in self.resnet.parameters():
+            params.requires_grad = False
+        
 
-    self.head = torch.nn.Sequential(
-        torch.nn.Flatten(),
-        torch.nn.Linear(in_features=2048, out_features=512, bias=True),
-        torch.nn.BatchNorm1d(512),
-        torch.nn.ReLU(),
-        torch.nn.Dropout(0.4),
-        torch.nn.Linear(512, 5, bias=True))
-    
+        self.head = torch.nn.Sequential(
+            torch.nn.Flatten(),
+            torch.nn.Linear(in_features=2048, out_features=512, bias=True),
+            torch.nn.BatchNorm1d(512),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.4),
+            torch.nn.Linear(512, 5, bias=True))
 
-  def forward(self, x):
-    feat = self.resnet(x)
-    output = self.head(feat)
-    return feat, output
+        self.head[1].register_forward_hook(self.fc_512)
 
+
+    def fc_512(self, module, input, output):
+        self.feat_rep = output
+
+    def forward(self, x):
+        feat = self.resnet(x)
+        output = self.head(feat)
+        representation = self.feat_rep
+        return representation, output
+
+
+class MyImageFolder(datasets.ImageFolder):
+    def __getitem__(self, index):
+        return super(MyImageFolder, self).__getitem__(index), self.imgs[index]
 
 def transforms_train():
     """
@@ -165,13 +178,13 @@ def get_dataloaders(train_transform=None, test_transform=None):
             batch_size - size of batch
             n_workers - number of workers
     """
-    training = torchvision.datasets.ImageFolder(root=PATH_TRAIN, transform=train_transform)
-    validation = torchvision.datasets.ImageFolder(root=PATH_VAL, transform=test_transform)
-    testing = torchvision.datasets.ImageFolder(root=PATH_TEST, transform=test_transform)
+    training = MyImageFolder(root=PATH_TRAIN, transform=train_transform)
+    validation = MyImageFolder(root=PATH_VAL, transform=test_transform)
+    testing = MyImageFolder(root=PATH_TEST, transform=test_transform)
 
     train_set = torch.utils.data.DataLoader(training, batch_size = BATCH_SIZE, shuffle=True, num_workers=N_WORKERS)
     val_set = torch.utils.data.DataLoader(validation, batch_size = BATCH_SIZE, shuffle=True, num_workers=N_WORKERS)
-    test_set = torch.utils.data.DataLoader(testing, batch_size = BATCH_SIZE, shuffle=True, num_workers=N_WORKERS)
+    test_set = torch.utils.data.DataLoader(testing, batch_size = BATCH_SIZE, shuffle=False, num_workers=N_WORKERS)
 
     return train_set, val_set, test_set
 
@@ -192,7 +205,9 @@ def train_loop(model, t_dataset, v_dataset, criterion, optimizer):
     epoch_v_loss = 0
     model.train()
     
-    for ind, (image, label) in enumerate(t_dataset):
+    for ind, data in enumerate(t_dataset):
+        (image, label), (paths, _) = data
+
         image = image.to(DEVICE)
         label = label.to(DEVICE)
 
@@ -218,12 +233,13 @@ def train_loop(model, t_dataset, v_dataset, criterion, optimizer):
     
     model.eval()
     with torch.no_grad():
-        for ind, (image, label) in enumerate(v_dataset):
-
+        for ind, data  in enumerate(v_dataset):
+            
+            (image, label), (paths, _) = data
             image = image.to(DEVICE)
             label = label.to(DEVICE)
 
-            _, output = model(image)
+            features, output = model(image)
 
             loss = criterion(output, label)
             epoch_v_loss += loss.item()
@@ -303,17 +319,22 @@ def test(model, test):
   total = 0
   predicted_prob = []
   actual_class = []
+  features = np.empty([0, 512])
+  image_ids = []
   predicted_class = []
   model.eval()
   with torch.no_grad():  
-    for image, label in test:
-
+    for (image, label), (paths,_) in test:
+        image_ids += [img.split('/')[-1].split(".")[0] for img in paths]
         image = image.to(DEVICE)
         label = label.type(torch.float).to(DEVICE)
-        _, output_prob = model(image)
+        representation, output_prob = model(image)
+        softmax_prob = torch.nn.functional.softmax(output_prob)
+        features= np.append(features, representation.cpu().numpy(), axis=0)
+  
         predicted = torch.argmax(output_prob, dim=1)
         actual_class.extend(label.cpu().tolist())
-        predicted_prob.extend(output_prob.tolist())
+        predicted_prob.extend(softmax_prob.tolist())
         predicted_class.extend(predicted.tolist())
         total += label.size(0)
         correct += (predicted == label).sum().item()
@@ -321,7 +342,7 @@ def test(model, test):
     test_accuracy = correct/total
     print('Test Accuracy: %f %%' %(test_accuracy))
 
-  return actual_class, predicted_class
+  return actual_class, predicted_class, predicted_prob, features, image_ids
 
 
 
@@ -339,7 +360,7 @@ def draw_training_curves(train_losses, test_losses, curve_name, epoch):
     plt.ylabel(curve_name)
     plt.xlabel('Epoch')
     plt.legend(frameon=False)
-    plt.savefig(VISUALIZATION + "/{}_curve_resnet50.png".format(curve_name))
+    plt.savefig(VISUALIZATION + "{}_curve_resnet50.png".format(curve_name))
     plt.close()
 
 
@@ -362,6 +383,31 @@ def plot_cm(lab, pred):
     plt.close()
 
 
+def create_output_csv(actual_class, predicted_class, predicted_prob, features, image_ids):
+
+    lf = open(FUSION + 'late_fusion.csv', 'w')
+    lf_writer = csv.writer(lf)
+    lf_writer.writerow(['id', 'actual class', 'predicted class', 'predicted probability'])
+
+    ef = open(FUSION + 'early_fusion.csv', 'w')
+    ef_writer = csv.writer(ef)
+    ef_writer.writerow(['id', 'actual class', 'representation'])
+
+    print(len(actual_class))
+    print(len(predicted_class))
+    print(len(predicted_prob))
+    print(features.shape)
+    print(len(image_ids))
+
+    for i, img_id in enumerate(image_ids):
+        lf_writer.writerow([img_id, actual_class[i], predicted_class[i], predicted_prob[i]])
+        ef_writer.writerow([img_id, actual_class[i], features[i]])
+
+
+    lf.close()
+    ef.close()
+
+
 if __name__ == "__main__":
 
   parser = argparse.ArgumentParser(description='Arguments for training/testing')
@@ -373,9 +419,9 @@ if __name__ == "__main__":
   train_dataloader, val_dataloader, test_dataloader = get_dataloaders(train_transform, test_transform)
 
 
-  nSamples = [71, 612, 3252, 1279, 912]
-  normedWeights = [1 - (x / sum(nSamples)) for x in nSamples]
-  normedWeights = torch.FloatTensor(normedWeights).to(DEVICE)
+#   nSamples = [71, 612, 3252, 1279, 912]
+#   normedWeights = [1 - (x / sum(nSamples)) for x in nSamples]
+#   normedWeights = torch.FloatTensor(normedWeights).to(DEVICE)
 
   if opt.mode== "train":
 
@@ -396,15 +442,17 @@ if __name__ == "__main__":
     curve_name = 'Accuracy'
     draw_training_curves(train_acc, val_acc, curve_name, epoch)
 
-    actual_class, predicted_class = test(model, test_dataloader)
 
-    print(classification_report(actual_class, predicted_class))
-
-    plot_cm(actual_class, predicted_class)
   else:
 
     # load specific model for test
     test_model = Resnet50().to(DEVICE)
-    test_model.load_state_dict(torch.load(CHECKPOINT + 'model.pth', map_location ='cuda:0'))
+    test_model.load_state_dict(torch.load(CHECKPOINT + 'early_stopping_resnet50.pth', map_location ='cuda:0'))
 
-    output_prob, output_class = test(test_model, test_dataloader)
+    actual_class, predicted_class, predicted_prob, features, image_ids = test(test_model, test_dataloader)
+    
+    create_output_csv(actual_class, predicted_class, predicted_prob, features, image_ids)
+    plot_cm(actual_class, predicted_class)
+
+    clsf_report = pd.DataFrame(classification_report(y_true = actual_class, y_pred = predicted_class, output_dict=True)).transpose()
+    clsf_report.to_csv(VISUALIZATION + 'task1_classification_report.csv', index= True)
