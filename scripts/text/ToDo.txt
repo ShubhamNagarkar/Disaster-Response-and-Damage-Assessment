@@ -1,0 +1,42 @@
+0. Preprocess the Dataset.
+1. Decide a baseline as in how many tweets per category we should have.
+2. Methods to upsample and downsample the dataset.
+3. Build NLP models to train and evaluate on multiclass clasification.
+4. Precision, recall, ROC curve, confusion matrix.
+5. Accuracy and Loss curve.
+6. Save the models you train.
+7. Have a comparison plot with the results available in the late fusion paper.
+**8. Interpretability of the NLP model.
+
+
+Fact Findings :
+- There are total of 6126 tweets in training dataset out of which 5263 are unique. It is necessary to work only on the unique tweets to avoid the bais.
+
+    Training Dataset class balance info::
+    Total Tweets: 5263
+    label                                     count   label_id
+    not_humanitarian                          2743      3
+    other_relevant_information                1192      2
+    rescue_volunteering_or_donation_effort     762      4
+    infrastructure_and_utility_damage          496      1
+    affected_individuals                        70      5
+
+    validation Dataset class balance info::
+    Total Tweets: 998
+    label
+    not_humanitarian                          521
+    other_relevant_information                239
+    rescue_volunteering_or_donation_effort    149
+    infrastructure_and_utility_damage          80
+    affected_individuals                        9
+
+    test Dataset class balance info::
+    Total Tweets: 955
+    label
+    not_humanitarian                          504
+    other_relevant_information                235
+    rescue_volunteering_or_donation_effort    126
+    infrastructure_and_utility_damage          81
+    affected_individuals                        9
+
+- Max Tweet Length: 129 chars and 20 words
